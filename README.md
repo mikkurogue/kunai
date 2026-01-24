@@ -42,7 +42,7 @@ keebect daemon --dry-run
 
 4. Add to Niri startup config (`~/.config/niri/config.kdl`):
 ```kdl
-spawn-at-startup { command ["keebect" "daemon"]; }
+spawn-at-startup = "keebect" "daemon"
 ```
 
 Or run manually:
