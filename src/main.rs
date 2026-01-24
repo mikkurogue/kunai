@@ -117,7 +117,7 @@ fn cmd_setup() -> Result<()> {
 
     println!("\n✓ Configuration saved!");
     println!("\nAdd to your niri config (~/.config/niri/config.kdl):");
-    println!("  spawn-at-startup {{ command [\"keebect\" \"daemon\"]; }}");
+    println!("  spawn-at-startup = \"keebect\" \"daemon\"");
     println!("\nOr run manually:");
     println!("  keebect daemon");
 
