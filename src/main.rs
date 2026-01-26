@@ -12,7 +12,7 @@ use evdev::Device;
 use tokio::sync::mpsc;
 
 #[derive(Parser)]
-#[command(name = "keebect")]
+#[command(name = "kunai")]
 #[command(about = "Per-keyboard layout switcher for Niri", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -117,9 +117,9 @@ fn cmd_setup() -> Result<()> {
 
     println!("\n✓ Configuration saved!");
     println!("\nAdd to your niri config (~/.config/niri/config.kdl):");
-    println!("  spawn-at-startup = \"keebect\" \"daemon\"");
+    println!("  spawn-at-startup \"kunai\" \"daemon\"");
     println!("\nOr run manually:");
-    println!("  keebect daemon");
+    println!("  kunai daemon");
 
     Ok(())
 }
@@ -128,7 +128,7 @@ async fn cmd_daemon(dry_run: bool) -> Result<()> {
     let config = Config::load()?;
 
     if config.keyboards.is_empty() {
-        anyhow::bail!("No keyboards configured. Run 'keebect setup' first.");
+        anyhow::bail!("No keyboards configured. Run 'kunai setup' first.");
     }
 
     // Build device ID -> (name, layout) map

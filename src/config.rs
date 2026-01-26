@@ -39,5 +39,5 @@ impl Config {
 fn get_config_path() -> Result<PathBuf> {
     let config_dir =
         dirs::config_dir().ok_or_else(|| anyhow::anyhow!("Could not find config directory"))?;
-    Ok(config_dir.join("keebect").join("config.toml"))
+    Ok(config_dir.join("kunai").join("config.toml"))
 }
