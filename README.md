@@ -1,5 +1,7 @@
 # kunai
 
+![build](https://github.com/mikkurogue/kunai/actions/workflows/rust.yml/badge.svg)
+
 Per-keyboard layout switcher for Niri compositor. Automatically switches keyboard layouts based on which physical keyboard you're typing on.
 
 ## What it does
