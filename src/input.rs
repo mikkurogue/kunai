@@ -46,6 +46,9 @@ pub fn list_keyboards() -> Result<Vec<Keyboard>> {
         let name = device.name().unwrap_or("Unknown");
 
         // Filter: must contain "Keyboard" and NOT contain "Receiver"
+        // Should somehow come up with a more reliable way to identify keyboards
+        // I'm not yet sure how to do this with evdev - multiple vendors use different naming
+        // conventions or the system cant assign the proper device "type" to it
         if !name.contains("Keyboard") || name.contains("Receiver") {
             continue;
         }
