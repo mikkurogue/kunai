@@ -2,12 +2,23 @@ mod config;
 mod input;
 mod niri;
 
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{
+        Duration,
+        Instant,
+    },
+};
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
-use config::{Config, KeyboardConfig};
+use clap::{
+    Parser,
+    Subcommand,
+};
+use config::{
+    Config,
+    KeyboardConfig,
+};
 use evdev::Device;
 use tokio::sync::mpsc;
 
@@ -106,9 +117,9 @@ fn cmd_setup() -> Result<()> {
             .interact()?;
 
         config.keyboards.push(KeyboardConfig {
-            name: kb.name,
-            vendor_id: format!("{:04x}", kb.vendor_id),
-            product_id: format!("{:04x}", kb.product_id),
+            name:         kb.name,
+            vendor_id:    format!("{:04x}", kb.vendor_id),
+            product_id:   format!("{:04x}", kb.product_id),
             layout_index: index as u32,
         });
     }

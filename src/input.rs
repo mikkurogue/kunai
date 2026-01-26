@@ -1,14 +1,17 @@
+use std::{
+    collections::HashMap,
+    fs,
+    path::PathBuf,
+};
+
 use anyhow::Result;
 use evdev::Device;
-use std::collections::HashMap;
-use std::fs;
-use std::path::PathBuf;
 
 pub struct Keyboard {
-    pub name: String,
+    pub name:        String,
     pub device_path: PathBuf,
-    pub vendor_id: u16,
-    pub product_id: u16,
+    pub vendor_id:   u16,
+    pub product_id:  u16,
 }
 
 /// List physical keyboards (name contains "Keyboard", not "Receiver")

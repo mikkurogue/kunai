@@ -1,7 +1,13 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::PathBuf,
+};
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -10,9 +16,9 @@ pub struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyboardConfig {
-    pub name: String,
-    pub vendor_id: String,
-    pub product_id: String,
+    pub name:         String,
+    pub vendor_id:    String,
+    pub product_id:   String,
     pub layout_index: u32,
 }
 

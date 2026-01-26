@@ -1,0 +1,20 @@
+hard_tabs = false
+max_width = 100
+
+comment_width = 100
+format_code_in_doc_comments = true
+wrap_comments = true
+
+group_imports = "StdExternalCrate"
+imports_granularity = "Crate"
+imports_layout = "Vertical"
+reorder_imports = true
+reorder_modules = true
+
+trailing_comma = "Vertical"
+indent_style = "Block"
+
+struct_field_align_threshold = 10
+use_field_init_shorthand = true
+
+fn_call_width = 60

@@ -1,6 +1,10 @@
-use anyhow::{Result, anyhow};
-use serde_json::Value;
 use std::process::Command;
+
+use anyhow::{
+    Result,
+    anyhow,
+};
+use serde_json::Value;
 
 /// Get available keyboard layouts from niri
 pub fn get_layouts() -> Result<Vec<String>> {
