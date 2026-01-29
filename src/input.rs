@@ -1,11 +1,19 @@
 use std::{
-    collections::HashMap,
+    collections::{
+        HashMap,
+        HashSet,
+    },
     fs,
     path::PathBuf,
+    sync::Arc,
 };
 
 use anyhow::Result;
 use evdev::Device;
+use rusb::{
+    Hotplug,
+    UsbContext,
+};
 
 pub struct Keyboard {
     pub name:        String,
@@ -69,4 +77,51 @@ pub fn list_keyboards() -> Result<Vec<Keyboard>> {
     }
 
     Ok(keyboards.into_values().collect())
+}
+
+pub struct HotPlugHandler {
+    pub configured_devices: Arc<HashSet<(u16, u16)>>,
+    pub signal_tx:          std::sync::mpsc::Sender<()>,
+}
+
+impl<T: UsbContext> Hotplug<T> for HotPlugHandler {
+    fn device_arrived(&mut self, device: rusb::Device<T>) {
+        let device_desc = match device.device_descriptor() {
+            Ok(desc) => desc,
+            Err(_) => return,
+        };
+
+        let vid = device_desc.vendor_id();
+        let pid = device_desc.product_id();
+
+        // Only signal if this device is in config
+        if self.configured_devices.contains(&(vid, pid)) {
+            tracing::info!("Configured keyboard detected: {:04x}:{:04x}", vid, pid);
+            let _ = self.signal_tx.send(());
+        } else {
+            tracing::debug!("Ignoring non-configured device: {:04x}:{:04x}", vid, pid);
+        }
+    }
+
+    fn device_left(&mut self, device: rusb::Device<T>) {
+        let device_desc = match device.device_descriptor() {
+            Ok(desc) => desc,
+            Err(_) => return,
+        };
+
+        let vid = device_desc.vendor_id();
+        let pid = device_desc.product_id();
+
+        // Only signal if this device is in config
+        if self.configured_devices.contains(&(vid, pid)) {
+            tracing::info!("Configured keyboard disconnected: {:04x}:{:04x}", vid, pid);
+            let _ = self.signal_tx.send(());
+        } else {
+            tracing::debug!(
+                "Ignoring non-configured device removal: {:04x}:{:04x}",
+                vid,
+                pid
+            );
+        }
+    }
 }

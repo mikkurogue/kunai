@@ -9,7 +9,7 @@ use serde_json::Value;
 /// Get available keyboard layouts from niri
 pub fn get_layouts() -> Result<Vec<String>> {
     let output = Command::new("niri")
-        .args(&["msg", "--json", "keyboard-layouts"])
+        .args(["msg", "--json", "keyboard-layouts"])
         .output()?;
 
     let json: Value = serde_json::from_slice(&output.stdout)?;
@@ -26,7 +26,7 @@ pub fn get_layouts() -> Result<Vec<String>> {
 /// Get current layout index
 pub fn get_current_index() -> Result<u32> {
     let output = Command::new("niri")
-        .args(&["msg", "--json", "keyboard-layouts"])
+        .args(["msg", "--json", "keyboard-layouts"])
         .output()?;
 
     let json: Value = serde_json::from_slice(&output.stdout)?;
@@ -48,7 +48,7 @@ pub fn switch_to_layout(target: u32) -> Result<()> {
 
     for _ in 0..steps {
         Command::new("niri")
-            .args(&["msg", "action", "switch-layout", "next"])
+            .args(["msg", "action", "switch-layout", "next"])
             .output()?;
     }
 
