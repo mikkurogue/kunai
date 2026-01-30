@@ -324,16 +324,32 @@ async fn cmd_daemon(dry_run: bool) -> Result<()> {
     // Channel for keyboard events (async)
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
-    // Channel for hotplug signals (sync → async bridge)
-    let (hotplug_tx, hotplug_rx) = std::sync::mpsc::channel();
+    // Channel for hotplug signals (async) - bridged from sync rusb channel
+    let (hotplug_async_tx, mut hotplug_async_rx) = mpsc::unbounded_channel::<()>();
 
-    // Start USB hotplug monitoring thread
+    // Start USB hotplug monitoring thread with async bridge
     if rusb::has_hotplug() {
         tracing::info!("Starting USB hotplug monitoring");
         let configured = Arc::new(configured_devices);
+
+        // Sync channel for rusb hotplug callbacks
+        let (hotplug_sync_tx, hotplug_sync_rx) = std::sync::mpsc::channel();
+
+        // Start the rusb hotplug monitor thread
         std::thread::spawn(move || {
-            if let Err(e) = run_hotplug_monitor(configured, hotplug_tx) {
+            if let Err(e) = run_hotplug_monitor(configured, hotplug_sync_tx) {
                 tracing::error!("Hotplug monitor failed: {}", e);
+            }
+        });
+
+        // Bridge task: forwards sync channel to async channel
+        // This runs as a dedicated task, not inside the select! loop
+        tokio::task::spawn_blocking(move || {
+            while let Ok(()) = hotplug_sync_rx.recv() {
+                if hotplug_async_tx.send(()).is_err() {
+                    // Receiver dropped, daemon is shutting down
+                    break;
+                }
             }
         });
     } else {
@@ -363,9 +379,6 @@ async fn cmd_daemon(dry_run: bool) -> Result<()> {
     let mut last_device = String::new();
     let mut last_switch = Instant::now();
 
-    // Wrap hotplug receiver in Arc<Mutex> for shared access
-    let hotplug_rx = Arc::new(std::sync::Mutex::new(hotplug_rx));
-
     // Main event loop
     loop {
         tokio::select! {
@@ -390,22 +403,19 @@ async fn cmd_daemon(dry_run: bool) -> Result<()> {
                 }
             }
 
-            // USB device change detected
-            result = tokio::task::spawn_blocking({
-                let rx = Arc::clone(&hotplug_rx);
-                move || {
-                    rx.lock().unwrap().recv()
-                }
-            }) => {
-                if let Ok(Ok(_)) = result {
-                    tracing::info!("USB device change detected");
-                    if let Err(e) = manage_keyboard_monitors(&mut state, event_tx.clone()).await {
-                        tracing::error!("Failed to re-enumerate devices: {}", e);
-                        if let Err(dump_err) = write_error_dump(&e) {
-                            tracing::error!("Failed to write error dump: {}", dump_err);
-                        }
-                        return Err(e);
+            // USB device change detected (from async bridge)
+            Some(()) = hotplug_async_rx.recv() => {
+                tracing::info!("USB device change detected, waiting for device initialization...");
+                // Give kernel/udev time to fully initialize the input device
+                // Without this delay, the evdev EventStream may not receive events
+                // from a newly plugged device
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if let Err(e) = manage_keyboard_monitors(&mut state, event_tx.clone()).await {
+                    tracing::error!("Failed to re-enumerate devices: {}", e);
+                    if let Err(dump_err) = write_error_dump(&e) {
+                        tracing::error!("Failed to write error dump: {}", dump_err);
                     }
+                    return Err(e);
                 }
             }
         }
