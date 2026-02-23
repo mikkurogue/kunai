@@ -14,7 +14,7 @@ tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 clap = { version = "4", features = ["derive"] }
 dialoguer = "0.12"
-chrono = "0.4.43"
+chrono = "0.4.44"
 rusb = "0.9.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
