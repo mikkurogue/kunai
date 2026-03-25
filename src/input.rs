@@ -9,7 +9,10 @@ use std::{
 };
 
 use anyhow::Result;
-use evdev::Device;
+use evdev::{
+    Device,
+    KeyCode,
+};
 use rusb::{
     Hotplug,
     UsbContext,
@@ -41,6 +44,8 @@ pub fn list_keyboards() -> Result<Vec<Keyboard>> {
         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         // Only process *-event-kbd entries (primary keyboard interface)
+        // We use ends_with to avoid matching secondary interfaces like -if02-event-kbd,
+        // which may advertise keyboard capabilities but not actually produce key events
         if !filename.ends_with("-event-kbd") {
             continue;
         }
@@ -53,11 +58,13 @@ pub fn list_keyboards() -> Result<Vec<Keyboard>> {
 
         let name = device.name().unwrap_or("Unknown");
 
-        // Filter: must contain "Keyboard" and NOT contain "Receiver"
-        // Should somehow come up with a more reliable way to identify keyboards
-        // I'm not yet sure how to do this with evdev - multiple vendors use different naming
-        // conventions or the system cant assign the proper device "type" to it
-        if !name.contains("Keyboard") || name.contains("Receiver") {
+        // Filter by capability: device must support standard letter keys (real keyboard)
+        // and must NOT be a wireless receiver (which presents as a keyboard but isn't one)
+        let is_keyboard = device
+            .supported_keys()
+            .map_or(false, |keys| keys.contains(KeyCode::KEY_A));
+
+        if !is_keyboard || name.contains("Receiver") {
             continue;
         }
 
