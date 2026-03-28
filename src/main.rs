@@ -7,6 +7,7 @@ use std::{
         HashMap,
         HashSet,
     },
+    path::PathBuf,
     sync::Arc,
     time::{
         Duration,
@@ -57,6 +58,10 @@ enum Commands {
         /// Dry-run mode: print layout switches without actually switching
         #[arg(long)]
         dry_run: bool,
+
+        /// Restart the daemon: kill any running instance and start fresh
+        #[arg(long)]
+        restart: bool,
     },
 
     /// Test mode: show which keyboard generates events
@@ -74,28 +79,110 @@ struct DaemonState {
 }
 
 fn main() -> Result<()> {
-    // Initialize tracing early
-    tracing_subscriber::fmt()
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Daemon { dry_run, restart } if restart => {
+            // --restart: kill old daemon, fork to background, start fresh
+            //
+            // We intentionally do NOT initialize tracing here. The parent
+            // uses eprintln! for its brief output, and the child initializes
+            // tracing to a log file after forking.
+
+            // Kill any running daemon first (before forking)
+            match kill_running_daemon() {
+                Ok(true) => eprintln!("Previous daemon stopped"),
+                Ok(false) => eprintln!("No running daemon found, starting fresh"),
+                Err(e) => {
+                    eprintln!("Warning: failed to stop running daemon: {}", e);
+                }
+            }
+
+            // Fork into the background
+            match unsafe { nix::unistd::fork() } {
+                Ok(nix::unistd::ForkResult::Parent { child }) => {
+                    // Parent: print the child PID and exit
+                    println!("Daemon started (PID {})", child);
+                    std::process::exit(0);
+                }
+                Ok(nix::unistd::ForkResult::Child) => {
+                    // Child: become a new session leader (detach from terminal)
+                    nix::unistd::setsid()?;
+
+                    // Redirect stdin/stdout/stderr to /dev/null
+                    let devnull = std::fs::File::open("/dev/null")?;
+                    let devnull_fd = std::os::unix::io::AsRawFd::as_raw_fd(&devnull);
+                    nix::unistd::dup2(devnull_fd, 0)?; // stdin
+                    nix::unistd::dup2(devnull_fd, 1)?; // stdout
+                    nix::unistd::dup2(devnull_fd, 2)?; // stderr
+
+                    // Reinitialize tracing to a log file (stderr is gone)
+                    init_file_tracing()?;
+
+                    tracing::info!("Daemon forked to background (PID {})", std::process::id());
+                    let runtime = tokio::runtime::Runtime::new()?;
+                    runtime.block_on(cmd_daemon(dry_run))
+                }
+                Err(e) => {
+                    anyhow::bail!("Failed to fork: {}", e);
+                }
+            }
+        }
+        _ => {
+            // All other commands: foreground with stderr tracing
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::from_default_env()
+                        .add_directive(tracing::Level::INFO.into()),
+                )
+                .init();
+
+            match cli.command {
+                Commands::List => cmd_list(),
+                Commands::Setup => cmd_setup(),
+                Commands::Daemon { dry_run, .. } => {
+                    // Foreground daemon (e.g. niri spawn-at-startup)
+                    let runtime = tokio::runtime::Runtime::new()?;
+                    runtime.block_on(cmd_daemon(dry_run))
+                }
+                Commands::Test => {
+                    let runtime = tokio::runtime::Runtime::new()?;
+                    runtime.block_on(cmd_test())
+                }
+            }
+        }
+    }
+}
+
+/// Initialize tracing to write to a log file (used after daemonizing when
+/// stderr is redirected to /dev/null).
+fn init_file_tracing() -> Result<()> {
+    let log_path = dirs::config_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not find config directory"))?
+        .join("kunai")
+        .join("daemon.log");
+
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+
+    // Re-initialize tracing with the file writer.
+    // The previous subscriber (from the parent process) was inherited across
+    // fork but its stderr is now /dev/null. We replace it with a file-based one.
+    let subscriber = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive(tracing::Level::INFO.into()),
         )
-        .init();
+        .with_writer(std::sync::Mutex::new(log_file))
+        .with_ansi(false)
+        .finish();
 
-    let cli = Cli::parse();
+    tracing::subscriber::set_global_default(subscriber)
+        .map_err(|e| anyhow::anyhow!("Failed to set tracing subscriber: {}", e))?;
 
-    match cli.command {
-        Commands::List => cmd_list(),
-        Commands::Setup => cmd_setup(),
-        Commands::Daemon { dry_run } => {
-            let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(cmd_daemon(dry_run))
-        }
-        Commands::Test => {
-            let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(cmd_test())
-        }
-    }
+    Ok(())
 }
 
 fn cmd_list() -> Result<()> {
@@ -190,6 +277,91 @@ fn write_error_dump(error: &anyhow::Error) -> Result<()> {
     tracing::error!("Error details written to: {}", dump_path.display());
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// PID file management
+// ---------------------------------------------------------------------------
+
+fn pid_file_path() -> Result<PathBuf> {
+    Ok(dirs::config_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not find config directory"))?
+        .join("kunai")
+        .join("daemon.pid"))
+}
+
+fn write_pid_file() -> Result<()> {
+    let path = pid_file_path()?;
+    std::fs::write(&path, std::process::id().to_string())?;
+    tracing::debug!("Wrote PID file: {}", path.display());
+    Ok(())
+}
+
+fn read_pid_file() -> Result<Option<nix::unistd::Pid>> {
+    let path = pid_file_path()?;
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => match contents.trim().parse::<i32>() {
+            Ok(pid) => Ok(Some(nix::unistd::Pid::from_raw(pid))),
+            Err(_) => {
+                tracing::warn!("Invalid PID in {}: {:?}", path.display(), contents);
+                Ok(None)
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn remove_pid_file() {
+    if let Ok(path) = pid_file_path()
+        && let Err(e) = std::fs::remove_file(&path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!("Failed to remove PID file: {}", e);
+    }
+}
+
+fn is_process_alive(pid: nix::unistd::Pid) -> bool {
+    // Signal 0 doesn't send a signal but checks if the process exists
+    nix::sys::signal::kill(pid, None).is_ok()
+}
+
+/// Kill a running daemon, waiting for it to exit. Returns Ok(true) if a daemon
+/// was killed, Ok(false) if no daemon was running.
+fn kill_running_daemon() -> Result<bool> {
+    let pid = match read_pid_file()? {
+        Some(pid) => pid,
+        None => return Ok(false),
+    };
+
+    if !is_process_alive(pid) {
+        tracing::info!("Stale PID file found (process {} not running), cleaning up", pid);
+        remove_pid_file();
+        return Ok(false);
+    }
+
+    tracing::info!("Sending SIGTERM to running daemon (PID {})", pid);
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM)?;
+
+    // Wait up to 2 seconds for the process to exit
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(100));
+        if !is_process_alive(pid) {
+            tracing::info!("Daemon (PID {}) terminated gracefully", pid);
+            remove_pid_file();
+            return Ok(true);
+        }
+    }
+
+    // Still alive — force kill
+    tracing::warn!("Daemon (PID {}) did not exit in time, sending SIGKILL", pid);
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL)?;
+
+    // Brief wait for SIGKILL to take effect
+    std::thread::sleep(Duration::from_millis(200));
+    remove_pid_file();
+
+    Ok(true)
 }
 
 fn run_hotplug_monitor(
@@ -295,6 +467,26 @@ async fn manage_keyboard_monitors(
 }
 
 async fn cmd_daemon(dry_run: bool) -> Result<()> {
+    // Check for an already-running instance
+    if let Ok(Some(pid)) = read_pid_file() {
+        if is_process_alive(pid) {
+            anyhow::bail!(
+                "Daemon already running (PID {}). Use --restart to replace it.",
+                pid
+            );
+        } else {
+            tracing::info!("Stale PID file found (process {} not running), cleaning up", pid);
+            remove_pid_file();
+        }
+    }
+
+    // Write our PID file
+    write_pid_file()?;
+
+    // Set up SIGTERM handler for graceful shutdown
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|e| anyhow::anyhow!("Failed to register SIGTERM handler: {}", e))?;
+
     let config = Config::load()?;
 
     if config.keyboards.is_empty() {
@@ -415,8 +607,16 @@ async fn cmd_daemon(dry_run: bool) -> Result<()> {
                     if let Err(dump_err) = write_error_dump(&e) {
                         tracing::error!("Failed to write error dump: {}", dump_err);
                     }
+                    remove_pid_file();
                     return Err(e);
                 }
+            }
+
+            // Graceful shutdown on SIGTERM
+            _ = sigterm.recv() => {
+                tracing::info!("Received SIGTERM, shutting down gracefully");
+                remove_pid_file();
+                return Ok(());
             }
         }
     }

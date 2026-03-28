@@ -512,6 +512,7 @@ dependencies = [
  "dirs",
  "evdev",
  "futures",
+ "nix",
  "rusb",
  "serde",
  "serde_json",
