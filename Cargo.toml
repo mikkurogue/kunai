@@ -16,6 +16,6 @@ clap = { version = "4.6.0", features = ["derive"] }
 dialoguer = "0.12"
 chrono = "0.4.44"
 rusb = "0.9.4"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-nix = { version = "0.31", features = ["signal", "process"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+nix = { version = "0.31.2", features = ["signal", "process", "fs"] }

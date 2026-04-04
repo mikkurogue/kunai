@@ -111,10 +111,9 @@ fn main() -> Result<()> {
 
                     // Redirect stdin/stdout/stderr to /dev/null
                     let devnull = std::fs::File::open("/dev/null")?;
-                    let devnull_fd = std::os::unix::io::AsRawFd::as_raw_fd(&devnull);
-                    nix::unistd::dup2(devnull_fd, 0)?; // stdin
-                    nix::unistd::dup2(devnull_fd, 1)?; // stdout
-                    nix::unistd::dup2(devnull_fd, 2)?; // stderr
+                    nix::unistd::dup2_stdin(&devnull)?;
+                    nix::unistd::dup2_stdout(&devnull)?;
+                    nix::unistd::dup2_stderr(&devnull)?;
 
                     // Reinitialize tracing to a log file (stderr is gone)
                     init_file_tracing()?;
