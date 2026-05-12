@@ -18,4 +18,4 @@ chrono = "0.4.44"
 rusb = "0.9.4"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-nix = { version = "0.31.2", features = ["signal", "process", "fs"] }
+nix = { version = "0.31.3", features = ["signal", "process", "fs"] }
