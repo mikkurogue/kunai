@@ -1,6 +1,6 @@
 use std::{
     collections::{
-        HashMap,
+        BTreeMap,
         HashSet,
     },
     fs,
@@ -25,11 +25,17 @@ pub struct Keyboard {
     pub product_id:  u16,
 }
 
-/// List physical keyboards (name contains "Keyboard", not "Receiver")
+/// List physical keyboards by scanning input devices.
+///
+/// Scans both `/dev/input/by-id/` (stable symlinks for USB devices) and
+/// `/dev/input/event*` directly (to catch Bluetooth HID and other keyboards
+/// not represented in by-id). Deduplicates by (vendor_id, product_id).
 pub fn list_keyboards() -> Result<Vec<Keyboard>> {
-    let mut keyboards = HashMap::new();
+    // Dedup key: (vendor_id, product_id) — matches the config/monitoring key scheme.
+    // Using an ordered map for deterministic output order.
+    let mut keyboards: BTreeMap<(u16, u16), Keyboard> = BTreeMap::new();
 
-    // Read /dev/input/by-id/ for stable device paths
+    // -- Scan 1: /dev/input/by-id/ (stable USB symlinks) --
     let by_id_path = "/dev/input/by-id/";
     if !PathBuf::from(by_id_path).exists() {
         anyhow::bail!(
@@ -41,46 +47,72 @@ pub fn list_keyboards() -> Result<Vec<Keyboard>> {
     for entry in fs::read_dir(by_id_path)? {
         let entry = entry?;
         let path = entry.path();
-        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-        // Only process *-event-kbd entries (primary keyboard interface)
-        // We use ends_with to avoid matching secondary interfaces like -if02-event-kbd,
-        // which may advertise keyboard capabilities but not actually produce key events
-        if !filename.ends_with("-event-kbd") {
-            continue;
-        }
-
-        // Try to open the device
         let device = match Device::open(&path) {
             Ok(d) => d,
-            Err(_) => continue, // Skip if we can't open (permissions)
+            Err(_) => continue,
         };
 
         let name = device.name().unwrap_or("Unknown");
 
-        // Filter by capability: device must support standard letter keys (real keyboard)
-        // and must NOT be a wireless receiver (which presents as a keyboard but isn't one)
         let is_keyboard = device
             .supported_keys()
-            .map_or(false, |keys| keys.contains(KeyCode::KEY_A));
+            .is_some_and(|keys| keys.contains(KeyCode::KEY_A));
 
         if !is_keyboard || name.contains("Receiver") {
             continue;
         }
 
         let input_id = device.input_id();
-        let (vendor_id, product_id) = (input_id.vendor(), input_id.product());
+        let vid_pid = (input_id.vendor(), input_id.product());
 
-        // Deduplicate by name (HashMap automatically handles this)
         keyboards.insert(
-            name.to_string(),
+            vid_pid,
             Keyboard {
-                name: name.to_string(),
-                device_path: fs::canonicalize(&path)?, // Resolve symlink to /dev/input/eventX
-                vendor_id,
-                product_id,
+                name:        name.to_string(),
+                device_path: fs::canonicalize(&path)?,
+                vendor_id:   input_id.vendor(),
+                product_id:  input_id.product(),
             },
         );
+    }
+
+    // -- Scan 2: /dev/input/event* directly (Bluetooth HID, etc.) --
+    let input_path = "/dev/input/";
+    for entry in fs::read_dir(input_path)? {
+        let entry = entry?;
+        let path = entry.path();
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+        if !filename.starts_with("event") {
+            continue;
+        }
+
+        let device = match Device::open(&path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let name = device.name().unwrap_or("Unknown");
+
+        let is_keyboard = device
+            .supported_keys()
+            .is_some_and(|keys| keys.contains(KeyCode::KEY_A));
+
+        if !is_keyboard || name.contains("Receiver") {
+            continue;
+        }
+
+        let input_id = device.input_id();
+        let vid_pid = (input_id.vendor(), input_id.product());
+
+        // Only insert if this VID:PID hasn't been seen yet (by-id entries take priority)
+        keyboards.entry(vid_pid).or_insert_with(|| Keyboard {
+            name:        name.to_string(),
+            device_path: fs::canonicalize(&path).unwrap_or(path),
+            vendor_id:   input_id.vendor(),
+            product_id:  input_id.product(),
+        });
     }
 
     Ok(keyboards.into_values().collect())
