@@ -334,7 +334,10 @@ fn kill_running_daemon() -> Result<bool> {
     };
 
     if !is_process_alive(pid) {
-        tracing::info!("Stale PID file found (process {} not running), cleaning up", pid);
+        tracing::info!(
+            "Stale PID file found (process {} not running), cleaning up",
+            pid
+        );
         remove_pid_file();
         return Ok(false);
     }
@@ -474,7 +477,10 @@ async fn cmd_daemon(dry_run: bool) -> Result<()> {
                 pid
             );
         } else {
-            tracing::info!("Stale PID file found (process {} not running), cleaning up", pid);
+            tracing::info!(
+                "Stale PID file found (process {} not running), cleaning up",
+                pid
+            );
             remove_pid_file();
         }
     }
