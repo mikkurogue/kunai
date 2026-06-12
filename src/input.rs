@@ -4,12 +4,16 @@ use std::{
         HashSet,
     },
     fs,
-    path::PathBuf,
+    path::{
+        Path,
+        PathBuf,
+    },
     sync::Arc,
 };
 
 use anyhow::Result;
 use evdev::{
+    BusType,
     Device,
     KeyCode,
 };
@@ -25,17 +29,46 @@ pub struct Keyboard {
     pub product_id:  u16,
 }
 
-/// List physical keyboards by scanning input devices.
-///
-/// Scans both `/dev/input/by-id/` (stable symlinks for USB devices) and
-/// `/dev/input/event*` directly (to catch Bluetooth HID and other keyboards
-/// not represented in by-id). Deduplicates by (vendor_id, product_id).
+struct ProbeResult {
+    name:      String,
+    vendor_id: u16,
+    product_id: u16,
+    bus_type:  BusType,
+}
+
+fn probe_keyboard(path: &Path) -> Option<ProbeResult> {
+    let device = Device::open(path).ok()?;
+    let name = device.name().unwrap_or("Unknown");
+
+    if name.contains("Receiver") {
+        return None;
+    }
+
+    let has_key_a = device
+        .supported_keys()
+        .is_some_and(|keys| keys.contains(KeyCode::KEY_A));
+
+    if !has_key_a {
+        return None;
+    }
+
+    let id = device.input_id();
+    Some(ProbeResult {
+        name: name.to_string(),
+        vendor_id: id.vendor(),
+        product_id: id.product(),
+        bus_type: id.bus_type(),
+    })
+}
+
 pub fn list_keyboards() -> Result<Vec<Keyboard>> {
-    // Dedup key: (vendor_id, product_id) — matches the config/monitoring key scheme.
-    // Using an ordered map for deterministic output order.
     let mut keyboards: BTreeMap<(u16, u16), Keyboard> = BTreeMap::new();
 
-    // -- Scan 1: /dev/input/by-id/ (stable USB symlinks) --
+    // Scan /dev/input/by-id/ for USB keyboard interfaces.
+    //
+    // We only process *-event-kbd symlinks. This matches both primary
+    // (-event-kbd) and secondary (-ifNN-event-kbd) interfaces, while
+    // excluding non-keyboard HID interfaces (e.g. gaming mouse -keyboard).
     let by_id_path = "/dev/input/by-id/";
     if !PathBuf::from(by_id_path).exists() {
         anyhow::bail!(
@@ -47,71 +80,83 @@ pub fn list_keyboards() -> Result<Vec<Keyboard>> {
     for entry in fs::read_dir(by_id_path)? {
         let entry = entry?;
         let path = entry.path();
-
-        let device = match Device::open(&path) {
-            Ok(d) => d,
-            Err(_) => continue,
+        let filename = match path.file_name().and_then(|n| n.to_str()) {
+            Some(f) => f,
+            None => continue,
         };
 
-        let name = device.name().unwrap_or("Unknown");
-
-        let is_keyboard = device
-            .supported_keys()
-            .is_some_and(|keys| keys.contains(KeyCode::KEY_A));
-
-        if !is_keyboard || name.contains("Receiver") {
+        if !filename.ends_with("-event-kbd") {
             continue;
         }
 
-        let input_id = device.input_id();
-        let vid_pid = (input_id.vendor(), input_id.product());
+        let probe = match probe_keyboard(&path) {
+            Some(p) => p,
+            None => continue,
+        };
 
-        keyboards.insert(
-            vid_pid,
-            Keyboard {
-                name:        name.to_string(),
-                device_path: fs::canonicalize(&path)?,
-                vendor_id:   input_id.vendor(),
-                product_id:  input_id.product(),
-            },
-        );
+        let vid_pid = (probe.vendor_id, probe.product_id);
+        let device_path = fs::canonicalize(&path)?;
+
+        // Prefer primary interfaces over secondary; secondary interfaces
+        // (-ifNN-) often claim KEY_A but don't actually produce events.
+        let is_primary = !filename.contains("-if");
+
+        if is_primary {
+            keyboards.insert(
+                vid_pid,
+                Keyboard {
+                    name:        probe.name,
+                    device_path,
+                    vendor_id:   probe.vendor_id,
+                    product_id:  probe.product_id,
+                },
+            );
+        } else {
+            keyboards.entry(vid_pid).or_insert_with(|| Keyboard {
+                name:        probe.name,
+                device_path,
+                vendor_id:   probe.vendor_id,
+                product_id:  probe.product_id,
+            });
+        }
     }
 
-    // -- Scan 2: /dev/input/event* directly (Bluetooth HID, etc.) --
-    let input_path = "/dev/input/";
-    for entry in fs::read_dir(input_path)? {
+    // Scan /dev/input/event* for Bluetooth and embedded keyboards.
+    //
+    // Only accept Bluetooth, i8042 (PS/2), and I2C buses. USB keyboards
+    // are already covered by the by-id scan above, so we skip USB here
+    // to avoid picking up gaming peripheral keyboard interfaces.
+    for entry in fs::read_dir("/dev/input/")? {
         let entry = entry?;
         let path = entry.path();
-        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let filename = match path.file_name().and_then(|n| n.to_str()) {
+            Some(f) => f,
+            None => continue,
+        };
 
         if !filename.starts_with("event") {
             continue;
         }
 
-        let device = match Device::open(&path) {
-            Ok(d) => d,
-            Err(_) => continue,
+        let probe = match probe_keyboard(&path) {
+            Some(p) => p,
+            None => continue,
         };
 
-        let name = device.name().unwrap_or("Unknown");
-
-        let is_keyboard = device
-            .supported_keys()
-            .is_some_and(|keys| keys.contains(KeyCode::KEY_A));
-
-        if !is_keyboard || name.contains("Receiver") {
+        if !matches!(
+            probe.bus_type,
+            BusType::BUS_BLUETOOTH | BusType::BUS_I8042 | BusType::BUS_I2C
+        ) {
             continue;
         }
 
-        let input_id = device.input_id();
-        let vid_pid = (input_id.vendor(), input_id.product());
+        let vid_pid = (probe.vendor_id, probe.product_id);
 
-        // Only insert if this VID:PID hasn't been seen yet (by-id entries take priority)
         keyboards.entry(vid_pid).or_insert_with(|| Keyboard {
-            name:        name.to_string(),
+            name:        probe.name,
             device_path: fs::canonicalize(&path).unwrap_or(path),
-            vendor_id:   input_id.vendor(),
-            product_id:  input_id.product(),
+            vendor_id:   probe.vendor_id,
+            product_id:  probe.product_id,
         });
     }
 
