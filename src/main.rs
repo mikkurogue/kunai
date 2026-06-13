@@ -34,12 +34,21 @@ use tokio::{
     sync::mpsc,
     task::JoinHandle,
 };
+use tracing::{
+    Level,
+    debug,
+    error,
+    info,
+    subscriber,
+    trace,
+    warn,
+};
 
 use crate::input::HotPlugHandler;
 
 #[derive(Parser)]
 #[command(name = "kunai")]
-#[command(about = "Per-keyboard layout switcher for Niri", long_about = None)]
+#[command(version, about = "Per-keyboard layout switcher for Niri", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -78,6 +87,17 @@ struct DaemonState {
     monitored_keyboards: HashMap<String, MonitoredKeyboard>, // "vid:pid" -> monitor info
 }
 
+/// Redirect stdin stdout and stderr to `/dev/null` as we dont care for these values when forking
+/// the daemon to restart it
+fn write_to_devnull() -> Result<()> {
+    let devnull = std::fs::File::open("/dev/null")?;
+    nix::unistd::dup2_stdin(&devnull)?;
+    nix::unistd::dup2_stdout(&devnull)?;
+    nix::unistd::dup2_stderr(&devnull)?;
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -91,10 +111,10 @@ fn main() -> Result<()> {
 
             // Kill any running daemon first (before forking)
             match kill_running_daemon() {
-                Ok(true) => eprintln!("Previous daemon stopped"),
-                Ok(false) => eprintln!("No running daemon found, starting fresh"),
+                Ok(true) => info!("Previous daemon stopped"),
+                Ok(false) => error!("No running daemon found, starting fresh"),
                 Err(e) => {
-                    eprintln!("Warning: failed to stop running daemon: {}", e);
+                    error!("Warning: failed to stop running daemon: {}", e);
                 }
             }
 
@@ -102,23 +122,19 @@ fn main() -> Result<()> {
             match unsafe { nix::unistd::fork() } {
                 Ok(nix::unistd::ForkResult::Parent { child }) => {
                     // Parent: print the child PID and exit
-                    println!("Daemon started (PID {})", child);
+                    info!("Daemon started (PID {})", child);
                     std::process::exit(0);
                 }
                 Ok(nix::unistd::ForkResult::Child) => {
                     // Child: become a new session leader (detach from terminal)
                     nix::unistd::setsid()?;
 
-                    // Redirect stdin/stdout/stderr to /dev/null
-                    let devnull = std::fs::File::open("/dev/null")?;
-                    nix::unistd::dup2_stdin(&devnull)?;
-                    nix::unistd::dup2_stdout(&devnull)?;
-                    nix::unistd::dup2_stderr(&devnull)?;
-
+                    write_to_devnull()?;
                     // Reinitialize tracing to a log file (stderr is gone)
                     init_file_tracing()?;
 
-                    tracing::info!("Daemon forked to background (PID {})", std::process::id());
+                    info!("Daemon forked to background (PID {})", std::process::id());
+
                     let runtime = tokio::runtime::Runtime::new()?;
                     runtime.block_on(cmd_daemon(dry_run))
                 }
@@ -132,7 +148,7 @@ fn main() -> Result<()> {
             tracing_subscriber::fmt()
                 .with_env_filter(
                     tracing_subscriber::EnvFilter::from_default_env()
-                        .add_directive(tracing::Level::INFO.into()),
+                        .add_directive(Level::INFO.into()),
                 )
                 .init();
 
@@ -171,14 +187,13 @@ fn init_file_tracing() -> Result<()> {
     // fork but its stderr is now /dev/null. We replace it with a file-based one.
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
+            tracing_subscriber::EnvFilter::from_default_env().add_directive(Level::INFO.into()),
         )
         .with_writer(std::sync::Mutex::new(log_file))
         .with_ansi(false)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber)
+    subscriber::set_global_default(subscriber)
         .map_err(|e| anyhow::anyhow!("Failed to set tracing subscriber: {}", e))?;
 
     Ok(())
@@ -273,7 +288,7 @@ fn write_error_dump(error: &anyhow::Error) -> Result<()> {
     writeln!(file, "{:?}", error)?;
     writeln!(file, "=====================================\n")?;
 
-    tracing::error!("Error details written to: {}", dump_path.display());
+    error!("Error details written to: {}", dump_path.display());
 
     Ok(())
 }
@@ -292,7 +307,7 @@ fn pid_file_path() -> Result<PathBuf> {
 fn write_pid_file() -> Result<()> {
     let path = pid_file_path()?;
     std::fs::write(&path, std::process::id().to_string())?;
-    tracing::debug!("Wrote PID file: {}", path.display());
+    debug!("Wrote PID file: {}", path.display());
     Ok(())
 }
 
@@ -302,7 +317,7 @@ fn read_pid_file() -> Result<Option<nix::unistd::Pid>> {
         Ok(contents) => match contents.trim().parse::<i32>() {
             Ok(pid) => Ok(Some(nix::unistd::Pid::from_raw(pid))),
             Err(_) => {
-                tracing::warn!("Invalid PID in {}: {:?}", path.display(), contents);
+                warn!("Invalid PID in {}: {:?}", path.display(), contents);
                 Ok(None)
             }
         },
@@ -316,7 +331,7 @@ fn remove_pid_file() {
         && let Err(e) = std::fs::remove_file(&path)
         && e.kind() != std::io::ErrorKind::NotFound
     {
-        tracing::warn!("Failed to remove PID file: {}", e);
+        warn!("Failed to remove PID file: {}", e);
     }
 }
 
@@ -334,7 +349,7 @@ fn kill_running_daemon() -> Result<bool> {
     };
 
     if !is_process_alive(pid) {
-        tracing::info!(
+        info!(
             "Stale PID file found (process {} not running), cleaning up",
             pid
         );
@@ -342,21 +357,21 @@ fn kill_running_daemon() -> Result<bool> {
         return Ok(false);
     }
 
-    tracing::info!("Sending SIGTERM to running daemon (PID {})", pid);
+    info!("Sending SIGTERM to running daemon (PID {})", pid);
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM)?;
 
     // Wait up to 2 seconds for the process to exit
     for _ in 0..20 {
         std::thread::sleep(Duration::from_millis(100));
         if !is_process_alive(pid) {
-            tracing::info!("Daemon (PID {}) terminated gracefully", pid);
+            info!("Daemon (PID {}) terminated gracefully", pid);
             remove_pid_file();
             return Ok(true);
         }
     }
 
     // Still alive — force kill
-    tracing::warn!("Daemon (PID {}) did not exit in time, sending SIGKILL", pid);
+    warn!("Daemon (PID {}) did not exit in time, sending SIGKILL", pid);
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL)?;
 
     // Brief wait for SIGKILL to take effect
@@ -382,11 +397,11 @@ fn run_hotplug_monitor(
             }),
         )?;
 
-    tracing::info!("USB hotplug monitoring started");
+    info!("USB hotplug monitoring started");
 
     loop {
         if let Err(e) = context.handle_events(None) {
-            tracing::error!("USB context error: {}", e);
+            error!("USB context error: {}", e);
             return Err(e.into());
         }
     }
@@ -396,10 +411,10 @@ async fn manage_keyboard_monitors(
     state: &mut DaemonState,
     event_tx: mpsc::UnboundedSender<(String, u32)>,
 ) -> Result<()> {
-    tracing::info!("Re-enumerating keyboards...");
+    info!("Re-enumerating keyboards...");
 
     let current_keyboards = input::list_keyboards().map_err(|e| {
-        tracing::error!("Failed to enumerate keyboards: {}", e);
+        error!("Failed to enumerate keyboards: {}", e);
         e
     })?;
 
@@ -424,11 +439,11 @@ async fn manage_keyboard_monitors(
             let name_clone = name.clone();
 
             let handle = tokio::spawn(async move {
-                tracing::info!("Started monitoring: {} → layout {}", name_clone, layout_idx);
+                info!("Started monitoring: {} → layout {}", name_clone, layout_idx);
 
                 monitor_keyboard(device_id_clone.clone(), layout_idx, stream, tx).await;
 
-                tracing::info!("Stopped monitoring: {} ({})", name_clone, device_id_clone);
+                info!("Stopped monitoring: {} ({})", name_clone, device_id_clone);
             });
 
             state.monitored_keyboards.insert(
@@ -439,11 +454,9 @@ async fn manage_keyboard_monitors(
                 },
             );
 
-            tracing::info!(
+            info!(
                 "Now monitoring: {} ({}) → layout {}",
-                name,
-                device_id,
-                layout_idx
+                name, device_id, layout_idx
             );
         }
     }
@@ -459,11 +472,11 @@ async fn manage_keyboard_monitors(
     for device_id in disconnected {
         if let Some(monitor) = state.monitored_keyboards.remove(&device_id) {
             monitor.task_handle.abort(); // Cancel the monitoring task
-            tracing::info!("Stopped monitoring: {} ({})", monitor.name, device_id);
+            info!("Stopped monitoring: {} ({})", monitor.name, device_id);
         }
     }
 
-    tracing::info!("Active monitors: {}", state.monitored_keyboards.len());
+    info!("Active monitors: {}", state.monitored_keyboards.len());
 
     Ok(())
 }
@@ -477,7 +490,7 @@ async fn cmd_daemon(dry_run: bool) -> Result<()> {
                 pid
             );
         } else {
-            tracing::info!(
+            info!(
                 "Stale PID file found (process {} not running), cleaning up",
                 pid
             );
@@ -526,7 +539,7 @@ async fn cmd_daemon(dry_run: bool) -> Result<()> {
 
     // Start USB hotplug monitoring thread with async bridge
     if rusb::has_hotplug() {
-        tracing::info!("Starting USB hotplug monitoring");
+        info!("Starting USB hotplug monitoring");
         let configured = Arc::new(configured_devices);
 
         // Sync channel for rusb hotplug callbacks
@@ -535,7 +548,7 @@ async fn cmd_daemon(dry_run: bool) -> Result<()> {
         // Start the rusb hotplug monitor thread
         std::thread::spawn(move || {
             if let Err(e) = run_hotplug_monitor(configured, hotplug_sync_tx) {
-                tracing::error!("Hotplug monitor failed: {}", e);
+                error!("Hotplug monitor failed: {}", e);
             }
         });
 
@@ -550,7 +563,7 @@ async fn cmd_daemon(dry_run: bool) -> Result<()> {
             }
         });
     } else {
-        tracing::warn!("USB hotplug not supported on this system");
+        warn!("USB hotplug not supported on this system");
     }
 
     // Initialize daemon state
@@ -560,7 +573,7 @@ async fn cmd_daemon(dry_run: bool) -> Result<()> {
     };
 
     // Initial device enumeration
-    tracing::info!("Performing initial keyboard enumeration");
+    info!("Performing initial keyboard enumeration");
     manage_keyboard_monitors(&mut state, event_tx.clone()).await?;
 
     if state.monitored_keyboards.is_empty() {
@@ -568,9 +581,9 @@ async fn cmd_daemon(dry_run: bool) -> Result<()> {
     }
 
     if dry_run {
-        tracing::info!("DRY-RUN MODE: Layout switches will be printed but not executed");
+        info!("DRY-RUN MODE: Layout switches will be printed but not executed");
     } else {
-        tracing::info!("Daemon started. Waiting for keyboard events...");
+        info!("Daemon started. Waiting for keyboard events...");
     }
 
     let mut last_device = String::new();
@@ -584,15 +597,15 @@ async fn cmd_daemon(dry_run: bool) -> Result<()> {
                 // Debounce: only switch if different device
                 if device_id != last_device && last_switch.elapsed() > Duration::from_millis(100) {
                     if dry_run {
-                        tracing::info!(
+                        info!(
                             "[DRY-RUN] Would switch to layout {} for device {}",
                             target_layout, device_id
                         );
                     } else {
                         if let Err(e) = niri::switch_to_layout(target_layout) {
-                            tracing::error!("Failed to switch layout: {}", e);
+                            error!("Failed to switch layout: {}", e);
                         } else {
-                            tracing::debug!("Switched to layout {} for device {}", target_layout, device_id);
+                            debug!("Switched to layout {} for device {}", target_layout, device_id);
                             last_device = device_id;
                             last_switch = Instant::now();
                         }
@@ -602,15 +615,15 @@ async fn cmd_daemon(dry_run: bool) -> Result<()> {
 
             // USB device change detected (from async bridge)
             Some(()) = hotplug_async_rx.recv() => {
-                tracing::info!("USB device change detected, waiting for device initialization...");
+                info!("USB device change detected, waiting for device initialization...");
                 // Give kernel/udev time to fully initialize the input device
                 // Without this delay, the evdev EventStream may not receive events
                 // from a newly plugged device
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 if let Err(e) = manage_keyboard_monitors(&mut state, event_tx.clone()).await {
-                    tracing::error!("Failed to re-enumerate devices: {}", e);
+                    error!("Failed to re-enumerate devices: {}", e);
                     if let Err(dump_err) = write_error_dump(&e) {
-                        tracing::error!("Failed to write error dump: {}", dump_err);
+                        error!("Failed to write error dump: {}", dump_err);
                     }
                     remove_pid_file();
                     return Err(e);
@@ -619,7 +632,7 @@ async fn cmd_daemon(dry_run: bool) -> Result<()> {
 
             // Graceful shutdown on SIGTERM
             _ = sigterm.recv() => {
-                tracing::info!("Received SIGTERM, shutting down gracefully");
+                info!("Received SIGTERM, shutting down gracefully");
                 remove_pid_file();
                 return Ok(());
             }
@@ -637,13 +650,13 @@ async fn monitor_keyboard(
         match stream.next_event().await {
             Ok(event) if event.value() == 1 => {
                 // Key press detected, send to main loop
-                tracing::trace!("Key press from device {}", device_id);
+                trace!("Key press from device {}", device_id);
                 let _ = tx.send((device_id.clone(), target_layout));
             }
             Ok(_) => {} // Ignore key releases
             Err(e) => {
                 // Device disconnected or error
-                tracing::info!("Device {} stream ended: {}", device_id, e);
+                info!("Device {} stream ended: {}", device_id, e);
                 break;
             }
         }
@@ -654,10 +667,11 @@ async fn cmd_test() -> Result<()> {
     let keyboards = input::list_keyboards()?;
 
     if keyboards.is_empty() {
-        anyhow::bail!("No keyboards detected. Check permissions.");
+        info!("No keyboards detected, check for uvdev permissions");
+        std::process::exit(1);
     }
 
-    println!("Monitoring keyboards... (press Ctrl+C to stop)\n");
+    info!("Monitoring keyboards... (press Ctrl+C to stop)\n");
 
     let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -675,10 +689,10 @@ async fn cmd_test() -> Result<()> {
 
     drop(tx);
 
-    // Print events as they come
     while let Some(name) = rx.recv().await {
         let now = chrono::Local::now();
-        println!("[{}] Event from: {}", now.format("%H:%M:%S"), name);
+        let text = format!("[{}] Event from: {}", now.format("%H:%M:%S"), name);
+        info!(text)
     }
 
     Ok(())

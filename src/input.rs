@@ -21,6 +21,10 @@ use rusb::{
     Hotplug,
     UsbContext,
 };
+use tracing::{
+    debug,
+    info,
+};
 
 pub struct Keyboard {
     pub name:        String,
@@ -30,10 +34,10 @@ pub struct Keyboard {
 }
 
 struct ProbeResult {
-    name:      String,
-    vendor_id: u16,
+    name:       String,
+    vendor_id:  u16,
     product_id: u16,
-    bus_type:  BusType,
+    bus_type:   BusType,
 }
 
 fn probe_keyboard(path: &Path) -> Option<ProbeResult> {
@@ -54,10 +58,10 @@ fn probe_keyboard(path: &Path) -> Option<ProbeResult> {
 
     let id = device.input_id();
     Some(ProbeResult {
-        name: name.to_string(),
-        vendor_id: id.vendor(),
+        name:       name.to_string(),
+        vendor_id:  id.vendor(),
         product_id: id.product(),
-        bus_type: id.bus_type(),
+        bus_type:   id.bus_type(),
     })
 }
 
@@ -105,18 +109,18 @@ pub fn list_keyboards() -> Result<Vec<Keyboard>> {
             keyboards.insert(
                 vid_pid,
                 Keyboard {
-                    name:        probe.name,
+                    name: probe.name,
                     device_path,
-                    vendor_id:   probe.vendor_id,
-                    product_id:  probe.product_id,
+                    vendor_id: probe.vendor_id,
+                    product_id: probe.product_id,
                 },
             );
         } else {
             keyboards.entry(vid_pid).or_insert_with(|| Keyboard {
-                name:        probe.name,
+                name: probe.name,
                 device_path,
-                vendor_id:   probe.vendor_id,
-                product_id:  probe.product_id,
+                vendor_id: probe.vendor_id,
+                product_id: probe.product_id,
             });
         }
     }
@@ -180,10 +184,10 @@ impl<T: UsbContext> Hotplug<T> for HotPlugHandler {
 
         // Only signal if this device is in config
         if self.configured_devices.contains(&(vid, pid)) {
-            tracing::info!("Configured keyboard detected: {:04x}:{:04x}", vid, pid);
+            info!("Configured keyboard detected: {:04x}:{:04x}", vid, pid);
             let _ = self.signal_tx.send(());
         } else {
-            tracing::debug!("Ignoring non-configured device: {:04x}:{:04x}", vid, pid);
+            debug!("Ignoring non-configured device: {:04x}:{:04x}", vid, pid);
         }
     }
 
@@ -198,13 +202,12 @@ impl<T: UsbContext> Hotplug<T> for HotPlugHandler {
 
         // Only signal if this device is in config
         if self.configured_devices.contains(&(vid, pid)) {
-            tracing::info!("Configured keyboard disconnected: {:04x}:{:04x}", vid, pid);
+            info!("Configured keyboard disconnected: {:04x}:{:04x}", vid, pid);
             let _ = self.signal_tx.send(());
         } else {
-            tracing::debug!(
+            debug!(
                 "Ignoring non-configured device removal: {:04x}:{:04x}",
-                vid,
-                pid
+                vid, pid
             );
         }
     }
