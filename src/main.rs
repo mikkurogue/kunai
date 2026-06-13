@@ -1,6 +1,7 @@
 mod config;
 mod input;
 mod niri;
+mod ui;
 
 use std::{
     collections::{
@@ -20,10 +21,7 @@ use clap::{
     Parser,
     Subcommand,
 };
-use config::{
-    Config,
-    KeyboardConfig,
-};
+use config::Config;
 use evdev::Device;
 use rusb::{
     Context,
@@ -60,7 +58,11 @@ enum Commands {
     List,
 
     /// Interactive setup to map keyboards to layouts
-    Setup,
+    Setup {
+        /// Dry-run mode: show config that would be written without saving
+        #[arg(long)]
+        dry_run: bool,
+    },
 
     /// Run as background daemon
     Daemon {
@@ -75,6 +77,9 @@ enum Commands {
 
     /// Test mode: show which keyboard generates events
     Test,
+
+    /// Live dashboard: monitor daemon log
+    Dashboard,
 }
 
 struct MonitoredKeyboard {
@@ -153,8 +158,8 @@ fn main() -> Result<()> {
                 .init();
 
             match cli.command {
-                Commands::List => cmd_list(),
-                Commands::Setup => cmd_setup(),
+                Commands::List => ui::list::run(),
+                Commands::Setup { dry_run } => ui::wizard::run(dry_run),
                 Commands::Daemon { dry_run, .. } => {
                     // Foreground daemon (e.g. niri spawn-at-startup)
                     let runtime = tokio::runtime::Runtime::new()?;
@@ -164,6 +169,7 @@ fn main() -> Result<()> {
                     let runtime = tokio::runtime::Runtime::new()?;
                     runtime.block_on(cmd_test())
                 }
+                Commands::Dashboard => ui::dashboard::run(),
             }
         }
     }
@@ -195,75 +201,6 @@ fn init_file_tracing() -> Result<()> {
 
     subscriber::set_global_default(subscriber)
         .map_err(|e| anyhow::anyhow!("Failed to set tracing subscriber: {}", e))?;
-
-    Ok(())
-}
-
-fn cmd_list() -> Result<()> {
-    let keyboards = input::list_keyboards()?;
-
-    if keyboards.is_empty() {
-        println!("No keyboards found.");
-        println!("\nNote: You may need to be in the 'input' group:");
-        println!("  sudo usermod -aG input $USER");
-        println!("  (then log out and back in)");
-        return Ok(());
-    }
-
-    println!("Found {} keyboard(s):\n", keyboards.len());
-    for (i, kb) in keyboards.iter().enumerate() {
-        println!("{}. {}", i + 1, kb.name);
-        println!("   Path: {:?}", kb.device_path);
-        println!("   ID: {:04x}:{:04x}\n", kb.vendor_id, kb.product_id);
-    }
-
-    Ok(())
-}
-
-fn cmd_setup() -> Result<()> {
-    let keyboards = input::list_keyboards()?;
-    let layouts = niri::get_layouts()?;
-
-    if keyboards.is_empty() {
-        anyhow::bail!("No keyboards detected. Check permissions.");
-    }
-
-    println!("Found {} keyboard(s)", keyboards.len());
-    println!("\nAvailable niri layouts:");
-    for (i, layout) in layouts.iter().enumerate() {
-        println!("  [{}] {}", i, layout);
-    }
-
-    let mut config = Config { keyboards: vec![] };
-
-    for kb in keyboards {
-        println!("\nConfigure: {}", kb.name);
-        let index: usize = dialoguer::Input::new()
-            .with_prompt(format!("Layout index (0-{})", layouts.len() - 1))
-            .validate_with(|input: &usize| {
-                if *input < layouts.len() {
-                    Ok(())
-                } else {
-                    Err(format!("Invalid index. Must be 0-{}", layouts.len() - 1))
-                }
-            })
-            .interact()?;
-
-        config.keyboards.push(KeyboardConfig {
-            name:         kb.name,
-            vendor_id:    format!("{:04x}", kb.vendor_id),
-            product_id:   format!("{:04x}", kb.product_id),
-            layout_index: index as u32,
-        });
-    }
-
-    config.save()?;
-
-    println!("\n✓ Configuration saved!");
-    println!("\nAdd to your niri config (~/.config/niri/config.kdl):");
-    println!("  spawn-at-startup \"kunai\" \"daemon\"");
-    println!("\nOr run manually:");
-    println!("  kunai daemon");
 
     Ok(())
 }
