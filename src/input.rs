@@ -24,6 +24,7 @@ use rusb::{
 use tracing::{
     debug,
     info,
+    warn,
 };
 
 pub struct Keyboard {
@@ -75,53 +76,53 @@ pub fn list_keyboards() -> Result<Vec<Keyboard>> {
     // excluding non-keyboard HID interfaces (e.g. gaming mouse -keyboard).
     let by_id_path = "/dev/input/by-id/";
     if !PathBuf::from(by_id_path).exists() {
-        anyhow::bail!(
+        warn!(
             "Cannot access {}. Are you in the 'input' group?",
             by_id_path
         );
-    }
+    } else {
+        for entry in fs::read_dir(by_id_path)? {
+            let entry = entry?;
+            let path = entry.path();
+            let filename = match path.file_name().and_then(|n| n.to_str()) {
+                Some(f) => f,
+                None => continue,
+            };
 
-    for entry in fs::read_dir(by_id_path)? {
-        let entry = entry?;
-        let path = entry.path();
-        let filename = match path.file_name().and_then(|n| n.to_str()) {
-            Some(f) => f,
-            None => continue,
-        };
+            if !filename.ends_with("-event-kbd") {
+                continue;
+            }
 
-        if !filename.ends_with("-event-kbd") {
-            continue;
-        }
+            let probe = match probe_keyboard(&path) {
+                Some(p) => p,
+                None => continue,
+            };
 
-        let probe = match probe_keyboard(&path) {
-            Some(p) => p,
-            None => continue,
-        };
+            let vid_pid = (probe.vendor_id, probe.product_id);
+            let device_path = fs::canonicalize(&path)?;
 
-        let vid_pid = (probe.vendor_id, probe.product_id);
-        let device_path = fs::canonicalize(&path)?;
+            // Prefer primary interfaces over secondary; secondary interfaces
+            // (-ifNN-) often claim KEY_A but don't actually produce events.
+            let is_primary = !filename.contains("-if");
 
-        // Prefer primary interfaces over secondary; secondary interfaces
-        // (-ifNN-) often claim KEY_A but don't actually produce events.
-        let is_primary = !filename.contains("-if");
-
-        if is_primary {
-            keyboards.insert(
-                vid_pid,
-                Keyboard {
+            if is_primary {
+                keyboards.insert(
+                    vid_pid,
+                    Keyboard {
+                        name: probe.name,
+                        device_path,
+                        vendor_id: probe.vendor_id,
+                        product_id: probe.product_id,
+                    },
+                );
+            } else {
+                keyboards.entry(vid_pid).or_insert_with(|| Keyboard {
                     name: probe.name,
                     device_path,
                     vendor_id: probe.vendor_id,
                     product_id: probe.product_id,
-                },
-            );
-        } else {
-            keyboards.entry(vid_pid).or_insert_with(|| Keyboard {
-                name: probe.name,
-                device_path,
-                vendor_id: probe.vendor_id,
-                product_id: probe.product_id,
-            });
+                });
+            }
         }
     }
 
