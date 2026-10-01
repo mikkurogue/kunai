@@ -25,6 +25,8 @@ This will:
 - Install to `/usr/local/bin/kunai`
 - Set up udev rules for keyboard access (no reboot/logout required)
 
+**Note** Make sure to read the install script, do not just blindly run shell scripts from the internet!
+
 ## Setup
 
 1. List available keyboards:
